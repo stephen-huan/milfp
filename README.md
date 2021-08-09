@@ -3,7 +3,8 @@
 A simple extension of [Python-MIP](https://github.com/coin-or/python-mip)
 to support linear fractional programming as well as linear programming.
 
-Uses the [reformulation-linearization](https://optimization.mccormick.northwestern.edu/index.php/Mixed-integer_linear_fractional_programming_(MILFP))
+Uses the [reformulation-linearization](
+https://optimization.mccormick.northwestern.edu/index.php/Mixed-integer_linear_fractional_programming_(MILFP))
 method to convert linear fractional programs to linear programs,
 specifically using the [Charnes-Cooper transformation](
 http://lpsolve.sourceforge.net/5.1/ratio.htm)
