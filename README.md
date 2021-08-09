@@ -1,4 +1,4 @@
-# Python MILFP (Mixed-Integer Linear Fractional Programming) Library
+# Python Mixed-Integer Linear Fractional Programming (MILFP) Library
 
 A simple extension of [Python-MIP](https://github.com/coin-or/python-mip)
 to support linear fractional programming as well as linear programming.
@@ -50,6 +50,8 @@ but it is probably simpler to shift a variable between [-N, M] to
 [0, N + M] and then subtract N from the value of the variable.
 
 ## Examples
+
+The matrix permutation problem in `examples/matrix_perm.py`.
 
 See the examples in [stephen-huan/probabilistic-rolling](
 https://github.com/stephen-huan/probabilistic-rolling)
