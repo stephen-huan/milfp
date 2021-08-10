@@ -12,6 +12,27 @@ NodeValue = Union["milfp.Node", Other]
 # caching can break if the model/variables are mutated...
 # TODO: take advantage of commutivity in caching (x1*x2 == x2*x1)
 # and for canceling (x1*x2*x1 = x1*x1*x2 = x1*x2)
+# TODO: switch back to brute force product for very small products
+
+# largest possible bound on L, U in glover's linearization
+# numerical issues start to happen around 10^9
+MAX_VALUE = 10**8
+
+def class_name(obj: object) -> str:
+    """ Returns the name of the class of an object. """
+    return f"{type(obj).__module__}.{type(obj).__name__}"
+
+def attribute_error(obj: object, name: str) -> AttributeError:
+    """ Returns a properly formatted AttributeError. """
+    error = f"'{class_name(obj)}' object has no attribute '{name}'"
+    return AttributeError(error)
+
+def notimplemented_error(obj: object, other: object,
+                         operator: str) -> NotImplementedError:
+    """ Returns a properly formatted NotImplementedError. """
+    obj, other = class_name(obj), class_name(other)
+    error = f"'{operator}' not implemented between '{obj}' and '{other}'"
+    return NotImplementedError(error)
 
 def quick_bound(sense: str, g: LinExpr) -> Real:
     """ Finds a quick bound on a linear expression with linear logic. """
@@ -34,8 +55,7 @@ def binary_var_product(x: Var, y: Var) -> LinExpr:
     assert x.var_type == y.var_type == mip.BINARY, "variables not binary"
     if x.equals(y):
         # product of binary variable with itself is just itself
-        pass
-        # return x
+        return x
     # multiple ways of doing this but this is probably the cleanest
     model = x.model
     z = model.add_var(name=f"__({x.name})*({y.name})",
@@ -60,9 +80,10 @@ def var_glover_product(x: Var, g: Union[Var, LinExpr]) -> Union[Var, LinExpr]:
         return glover_product(LinExpr(ys, range(1, len(ys) + 1), x.lb), g)
     # binary variable
     else:
-        # find lower and upper bound of g with relaxation
         L, U = quick_bound(mip.MINIMIZE, g), quick_bound(mip.MAXIMIZE, g)
+        # find lower and upper bound of g with relaxation
         # L, U = bound(model, mip.MINIMIZE, g), bound(model, mip.MAXIMIZE, g)
+        L, U = max(L, -MAX_VALUE), min(U, MAX_VALUE)
         # apply Glover's linearization
         y = model.add_var(lb=L, ub=U, var_type=mip.CONTINUOUS)
         model += L*x <= y
@@ -103,9 +124,9 @@ def is_discrete(x: NodeValue) -> bool:
 def value(x: NodeValue) -> Union[Var, LinExpr, Real]:
     """ Converts a Node or NonLinExpr into a proper mip variable. """
     if isinstance(x, Node):
-        return x.linearize()
-    if type(x) == NonLinExpr:
         return x.linear_form
+    if type(x) == NonLinExpr:
+        return value(x.root)
     return x
 
 def get_model(x: NodeValue) -> Union[mip.Model, None]:
@@ -130,6 +151,8 @@ class Node():
         }
         assert operator in self.ops, f"unsupported operation {operator}"
         self.operator, self.left, self.right = operator, left, right
+        # placeholder variable
+        self.__linear_form = None
         # computed properties
         left_model, right_model = get_model(self.left), get_model(self.right)
         self.model = left_model if right_model is None else right_model
@@ -159,11 +182,17 @@ product of two continuous variables")
         # only choice is to apply Glover's to the continuous side 
         elif num_discrete == 1:
             l, r = (l, r) if is_discrete(l) else (r, l)
-            return value(product(value(l), value(r), glover=True))
+            return product(value(l), value(r), glover=True)
         # choose side by minimizing number of terms
         else:
-            return value(product(value(l), value(r), glover=False))
+            return product(value(l), value(r), glover=False)
 
+    @property
+    def linear_form(self) -> mip.LinExpr:
+        """ Wraps linearize with additional caching. """
+        if self.__linear_form is None:
+            self.__linear_form = to_LinExpr(self.linearize())
+        return self.__linear_form
 
 class NonLinExpr():
     """
@@ -176,7 +205,6 @@ class NonLinExpr():
 
     def __init__(self, *args, **kwargs):
         self.root = LinExpr(*args, **kwargs)
-        self.__linear_form = self.root
 
     def __str__(self) -> str:
         return str(self.root)
@@ -191,29 +219,32 @@ class NonLinExpr():
         # soft copy, we need a new object, but we can recycle node pointers
         result = NonLinExpr()
         result.root = Node(operator, self.root, other)
-        result.__linear_form = None
         return result
 
     @property
     def linear_form(self) -> mip.LinExpr:
-        """
-        Reduces the nonlinear expression into a linear expression.
-
-        Wraps the Node's linearize function with additional caching.
-        """
-        if self.__linear_form is None:
-            self.__linear_form = value(self.root.linearize())
-        return self.__linear_form
+        """ Simple wrapper over Node's linearize function. """
+        return value(self.root)
 
     def compare(self, comparision: str, other: Other) -> mip.LinExpr:
         """ Uses the derived linear expression for comparisions. """
-        return getattr(self.linear_form, comparision)(other)
+        result = getattr(self.linear_form, comparision)(other)
+        # this shouldn't ever happen, so raise an error to prevent loops
+        # we have to wrap both sides in type() because == is overwritten
+        if type(result) == type(NotImplemented):
+            raise notimplemented_error(self, other, comparision)
+        return result
 
     # in Python, __getattr__ is called only when AttributeError would happen
     # this introduces hard to debug errors because it ignores AttributeError
     def __getattr__(self, name: str):
         """ Uses the derived linear expression for attribute lookups. """
-        return getattr(self.linear_form, name)
+        if name in {"expr", "const", "sense", "x",
+                    "add_var", "add_term"}:
+            return getattr(self.linear_form, name)
+        # in theory, LinExpr's __getattr__ should throw AttributeError here
+        # in practice this will get into infinite loops for bad lookups 
+        raise attribute_error(self, name)
 
 # TODO: power x**k
 # TODO: unitary negative -x
@@ -245,7 +276,7 @@ class LinExpr(mip.LinExpr, NonLinExpr):
         return copy
 
     def __getattr__(self, name: str):
-        raise AttributeError
+        raise attribute_error(self, name)
 
 
 class Var(mip.Var):
@@ -275,7 +306,11 @@ class Model(mip.Model):
     objective = property(mip.Model.objective.fget, set_objective)
 
 
-def to_LinExpr(x: Union[Var, Linear], cls: Linear=LinExpr) -> Linear:
-    """ Converts a variable into a linear expression. """
-    return cls([x], [1]) if isinstance(x, Var) else x
+def to_LinExpr(x: NodeValue, cls: Linear=LinExpr) -> Linear:
+    """ Converts any reasonable type into a linear expression. """
+    if isinstance(x, Var):
+        return cls([x], [1])
+    if isinstance(x, Real):
+        return cls(const=x)
+    return value(x)
 
